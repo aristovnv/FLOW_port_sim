@@ -99,7 +99,7 @@ class TruckOperations:
             container_types = list(self.terminal.yard.keys())
             random.shuffle(container_types)
             for container_type in container_types:
-                actual_qty = terminal.remove_container('import', container_type, is_feu=is_feu, count=1, current_date=current_time)
+                actual_qty = self.terminal.remove_container('import', container_type, is_feu=is_feu, count=1, current_date=current_time)
                 if is_feu:
                     if self.terminal.yard[container_type]['import_FEU'] > 0:
                         self.terminal.yard[container_type]['import_FEU'] -= actual_qty
@@ -129,7 +129,7 @@ class TruckOperations:
                 if (total_capacity + 1 < self.terminal.yard_capacity[container_type]):
                     self.terminal.yard[container_type]['import_FEU'] += 1
                     self.terminal.yard[container_type]['import'] += 2
-                    terminal.add_container('export', container_type, is_feu=is_feu, count=1, current_date=current_time)
+                    self.terminal.add_container('export', container_type, is_feu=is_feu, count=1, current_date=current_time)
                     actual_unloaded += 2
                     actual_unloaded_cnt += 1
                     
@@ -137,7 +137,7 @@ class TruckOperations:
                 if (total_capacity < self.terminal.yard_capacity[container_type]):
                     self.terminal.yard[container_type]['import_TEU'] += 1
                     self.terminal.yard[container_type]['import'] += 1
-                    terminal.add_container('import', container_type, is_feu=is_feu, count=1, current_date=current_time)
+                    self.terminal.add_container('import', container_type, is_feu=is_feu, count=1, current_date=current_time)
                     actual_unloaded += 1
                     actual_unloaded_cnt += 1
                     
@@ -295,11 +295,11 @@ class Terminal:
     def remove_container(self, operation, container_type, is_feu, count, current_date):
 
         date_str = current_date.strftime("%Y-%m-%d")
-                
         # Update the count based on container type (TEU or FEU)
         container_key = 'FEU' if is_feu else 'TEU'
         remove_cnt = min(self.container_schedule.get(operation, {}).get(date_str, {}).get(container_type, {}).get(container_key, 0), count)
-        self.container_schedule[operation][date_str][container_type][container_key] -= remove_cnt
+        if remove_cnt > 0:
+            self.container_schedule[operation][date_str][container_type][container_key] -= remove_cnt
         return remove_cnt
 
     def init_stocks(self, current_date):
@@ -544,23 +544,23 @@ def simulate(terminal, ships, start_date, end_date):
         current_time += datetime.timedelta(hours=1)
 
 # Example usage
-start_date = datetime.datetime(2024, 11, 6)
-end_date = datetime.datetime(2024, 11, 30)
-terminal = Terminal('Maher')
+#start_date = datetime.datetime(2024, 11, 6)
+#end_date = datetime.datetime(2024, 11, 30)
+#terminal = Terminal('Maher')
 
 # Generate some example ships
-ships = [
-    Ship('Operator1', 4, 'Origin1', start_date + datetime.timedelta(days=random.randint(0, 30))),
-    Ship('Operator2', 5, 'Origin2', start_date + datetime.timedelta(days=random.randint(0, 30))),
-    Ship('Operator3', 6, 'Origin3', start_date + datetime.timedelta(days=random.randint(0, 30))),
+#ships = [
+#    Ship('Operator1', 4, 'Origin1', start_date + datetime.timedelta(days=random.randint(0, 30))),
+#    Ship('Operator2', 5, 'Origin2', start_date + datetime.timedelta(days=random.randint(0, 30))),
+#    Ship('Operator3', 6, 'Origin3', start_date + datetime.timedelta(days=random.randint(0, 30))),
     # Add more ships as needed
-]
+#]
 
-trains = [
+#trains = [
+#
+#]
 
-]
-
-simulate(terminal, ships, start_date, end_date)
+#simulate(terminal, ships, start_date, end_date)
 '''
 print("Hourly Stats:")
 for stat in terminal.hourly_stats:  # Print first 5 days
@@ -568,6 +568,7 @@ for stat in terminal.hourly_stats:  # Print first 5 days
 '''
 
 # Print some results
+'''
 print("Daily Stats:")
 for stat in terminal.daily_stats:  # Print first 5 days
     print(f"Date: {stat['date']}, Loaded (Ship): {stat['total_loaded']}, Unloaded (Ship): {stat['total_unloaded']}, \
@@ -576,3 +577,4 @@ for stat in terminal.daily_stats:  # Print first 5 days
           {stat['total_truck_unloaded']}, total_truck_loaded_cnt: {stat['total_truck_cnt_loaded']}, total_truck_unloaded_cnt: \
           {stat['total_truck_cnt_unloaded']}, train loaded: {stat['train_loaded']}, train unloaded: {stat['train_unloaded']} \
             , train loaded cnt: {stat['train_cnt_loaded']}, train unloaded cnt: {stat['train_cnt_unloaded']}")
+'''
