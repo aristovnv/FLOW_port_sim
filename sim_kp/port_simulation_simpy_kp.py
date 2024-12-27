@@ -12,13 +12,21 @@ from collections import defaultdict
 class Container:
     def __init__(self, id, arrival_time):
         self.id = id
-        self.type = 'reefer' if random.random() < 0.05 else 'dry'  # 5% reefer
-        self.modal = 'train' if random.random() < 0.15 else 'truck'  # 15% train
+        
+        # Use normal distribution for reefer percentage (mean=5%, std=0.5%)
+        reefer_prob = max(0, min(1, random.normalvariate(0.05, 0.005)))
+        self.type = 'reefer' if random.random() < reefer_prob else 'dry'
+        
+        # Use normal distribution for train percentage (mean=15%, std=1%)
+        train_prob = max(0, min(1, random.normalvariate(0.15, 0.01)))
+        self.modal = 'train' if random.random() < train_prob else 'truck'
+        
         self.arrival_time = arrival_time
+        self.yard_entry_time = None
         self.ready_time = None
         self.departure_time = None
         
-        # Set dwell time based on type
+        # Set planned dwell time based on type
         if self.type == 'reefer':
             # 2.1 ± 0.8 days
             self.dwell_time = random.normalvariate(2.1, 0.8) * 24 * 60
@@ -327,14 +335,29 @@ class PortSimulation:
         self.env = simpy.Environment()
         self.berths = simpy.Resource(self.env, capacity=MAX_BERTHS)
         self.cranes = simpy.Resource(self.env, capacity=MAX_BERTHS * CRANES_PER_BERTH)
-        # Set gate capacity to 50 positions
-        # With each position processing a truck every 10 minutes
-        # This gives us: 50 positions * 6 trucks per hour = 300 trucks per hour
         self.gate = simpy.Resource(self.env, capacity=50)
         
-        # Regular and reefer yards
-        self.regular_yard = simpy.Container(self.env, capacity=25000)
-        self.reefer_yard = simpy.Container(self.env, capacity=2000)
+        # Initialize yard containers tracking
+        self.yard_containers = {
+            'dry': {
+                'truck': [],
+                'train': []
+            },
+            'reefer': {
+                'truck': [],
+                'train': []
+            }
+        }
+        
+        # Create yards with modal split
+        self.regular_yard = {
+            'truck': simpy.Container(self.env, capacity=int(25000 * 0.85)),  # 21,250
+            'train': simpy.Container(self.env, capacity=int(25000 * 0.15))   # 3,750
+        }
+        self.reefer_yard = {
+            'truck': simpy.Container(self.env, capacity=int(2000 * 0.85)),  # 1,700
+            'train': simpy.Container(self.env, capacity=int(2000 * 0.15))   # 300
+        }
         
         # Train schedule (4 trains per day)
         self.train_times = [6, 12, 18, 24]  # 6am, 12pm, 6pm, 12am
@@ -407,90 +430,108 @@ class PortSimulation:
 
     def process_container(self, container):
         """Process container after unloading"""
-        # Try to place in appropriate yard
-        if container.type == 'reefer':
-            if self.reefer_yard.level < self.reefer_yard.capacity:
-                yield self.reefer_yard.put(1)
-            else:
-                self.stats.log_yard_full()
-                return  # Container rejected if yard is full
+        yard = self.reefer_yard if container.type == 'reefer' else self.regular_yard
+        container_list = self.yard_containers[container.type][container.modal]
+        
+        if yard[container.modal].level < yard[container.modal].capacity:
+            container.yard_entry_time = self.env.now
+            
+            # First add to tracking list
+            if container not in container_list:
+                container_list.append(container)
+            
+            # Then add to physical yard
+            yield yard[container.modal].put(1)
+            
+            # Update yard statistics
+            self.stats.update_yard_state(
+                self.regular_yard['truck'].level + self.regular_yard['train'].level,
+                self.reefer_yard['truck'].level + self.reefer_yard['train'].level
+            )
+            
+            # Set container ready time
+            container.ready_time = self.env.now + container.dwell_time
+            
+            # Process departure after dwell time
+            yield self.env.timeout(container.dwell_time)
+            
+            if container.modal == "truck":
+                if container in container_list:
+                    try:
+                        # Use a flag to track if departure was successful
+                        container.departure_started = True
+                        yield self.env.process(self.handle_truck_departure(container))
+                    except Exception as e:
+                        print(f"Error during truck departure for container {container.id}: {e}")
+                # Remove warning as it's not needed - container might have already departed
+            
+            # Record container processed
+            self.stats.log_container(container.type, container.modal)
         else:
-            if self.regular_yard.level < self.regular_yard.capacity:
-                yield self.regular_yard.put(1)
-            else:
-                self.stats.log_yard_full()
-                return  # Container rejected if yard is full
-        
-        # Set container ready time
-        container.ready_time = self.env.now + container.dwell_time
-        
-        # Process departure after dwell time
-        yield self.env.timeout(container.dwell_time)
-        
-        if container.modal == "truck":
-            yield self.env.process(self.handle_truck_departure(container))
-        else:
-            # Train containers wait in yard until next train
-            pass
-        
-        # Record statistics
-        self.stats.log_container(container.type, container.modal)
-        self.stats.log_dwell_time(container.type, container.dwell_time)
+            self.stats.log_yard_full()
+            return
 
     def handle_truck_departure(self, container):
         """Process truck departures during gate hours"""
         while True:
-            # Check if within gate hours
-            current_hour = int((self.env.now / 60) % 24)  # Properly round to integer hour
+            current_hour = int((self.env.now / 60) % 24)
             
-            # If outside gate hours, wait until next opening
             if current_hour < GATE_HOURS["open"] or current_hour >= GATE_HOURS["close"]:
-                # Calculate minutes until next gate opening
                 if current_hour >= GATE_HOURS["close"]:
-                    # If after closing, wait until next day's opening
                     next_opening = ((24 - current_hour) + GATE_HOURS["open"]) * 60
                 else:
-                    # If before opening, wait until opening
                     next_opening = (GATE_HOURS["open"] - current_hour) * 60
                 yield self.env.timeout(next_opening)
                 continue
-                
-            # Process truck during gate hours
+            
             with self.gate.request() as gate_req:
                 start_wait = self.env.now
                 yield gate_req
                 
-                # Verify we're still within gate hours after getting gate access
                 current_hour = int((self.env.now / 60) % 24)
                 if current_hour < GATE_HOURS["open"] or current_hour >= GATE_HOURS["close"]:
-                    continue  # If we're now outside gate hours, try again
+                    continue
                 
-                # Process time at gate - exactly 10 minutes
-                yield self.env.timeout(10)
-                container.departure_time = self.env.now
+                container_list = self.yard_containers[container.type]['truck']
                 
-                # Remove from appropriate yard
-                if container.type == 'reefer':
-                    yield self.reefer_yard.get(1)
+                # Only process if container hasn't already departed
+                if container in container_list and not hasattr(container, 'departure_processed'):
+                    # Process time at gate
+                    yield self.env.timeout(10)
+                    container.departure_time = self.env.now
+                    
+                    # Mark container as processed to prevent duplicate processing
+                    container.departure_processed = True
+                    
+                    # Remove from tracking list
+                    container_list.remove(container)
+                    
+                    # Remove from physical yard
+                    if container.type == 'reefer':
+                        yield self.reefer_yard['truck'].get(1)
+                    else:
+                        yield self.regular_yard['truck'].get(1)
+                    
+                    # Calculate actual dwell time
+                    actual_dwell_time = container.departure_time - container.yard_entry_time
+                    
+                    departure_hour = int((self.env.now / 60) % 24)
+                    if GATE_HOURS["open"] <= departure_hour < GATE_HOURS["close"]:
+                        self.stats.log_wait_time('gate', self.env.now - start_wait)
+                        self.stats.log_container_departure(container.type, 'truck', departure_hour)
+                        self.stats.log_dwell_time(container.type, actual_dwell_time)
+                        break
                 else:
-                    yield self.regular_yard.get(1)
-                
-                # Get the hour at departure time
-                departure_hour = int((self.env.now / 60) % 24)
-                
-                # Only log departure if within gate hours
-                if GATE_HOURS["open"] <= departure_hour < GATE_HOURS["close"]:
-                    self.stats.log_wait_time('gate', self.env.now - start_wait)
-                    self.stats.log_container_departure(container.type, 'truck', departure_hour)
+                    # Container has already been processed or removed, exit quietly
                     break
 
     def handle_train_departure(self):
         """Process train departure with up to 250 containers"""
         current_hour = int((self.env.now / 60) % 24)
         
-        # Get current container counts in yards
-        regular_count = self.regular_yard.level
-        reefer_count = self.reefer_yard.level
+        # Get current train container counts in yards
+        regular_count = self.regular_yard['train'].level
+        reefer_count = self.reefer_yard['train'].level
         
         # Target 150 containers per train, max 250
         target_containers = min(150, regular_count + reefer_count)
@@ -507,16 +548,14 @@ class PortSimulation:
             regular_to_take = min(regular_count, int(target_containers * regular_ratio))
             reefer_to_take = min(reefer_count, target_containers - regular_to_take)
             
-            # Remove containers from yards
+            # Remove containers from train yards only
             if regular_to_take > 0:
-                yield self.regular_yard.get(regular_to_take)
-                # Log each container departure
+                yield self.regular_yard['train'].get(regular_to_take)
                 for _ in range(regular_to_take):
                     self.stats.log_container_departure('dry', 'train', current_hour)
                 
             if reefer_to_take > 0:
-                yield self.reefer_yard.get(reefer_to_take)
-                # Log each container departure
+                yield self.reefer_yard['train'].get(reefer_to_take)
                 for _ in range(reefer_to_take):
                     self.stats.log_container_departure('reefer', 'train', current_hour)
             
@@ -528,8 +567,8 @@ class PortSimulation:
             
             # Update yard state with current levels
             self.stats.update_yard_state(
-                self.regular_yard.level,
-                self.reefer_yard.level
+                self.regular_yard['train'].level,
+                self.reefer_yard['train'].level
             )
         else:
             self.stats.log_missed_train()
@@ -542,7 +581,7 @@ class PortSimulation:
 if __name__ == "__main__":
     # Run simulation for 30 days
     sim = PortSimulation()
-    sim.run(30 * 24 * 60)  # 30 days in minutes
+    sim.run(60 * 24 * 60)  # 30 days in minutes
     
     # Print hourly truck departure distribution
     print("\nHourly Truck Departure Distribution:")
