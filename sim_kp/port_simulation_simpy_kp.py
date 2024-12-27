@@ -13,12 +13,18 @@ class Container:
     def __init__(self, id, arrival_time):
         self.id = id
         
-        # Use normal distribution for reefer percentage (mean=5%, std=0.5%)
-        reefer_prob = max(0, min(1, random.normalvariate(0.05, 0.005)))
+        # Use normal distribution for reefer percentage based on config
+        reefer_prob = max(0, min(1, random.normalvariate(
+            CONTAINER_TYPES["reefer"]["probability"],
+            CONTAINER_TYPES["reefer"]["probability"] * 0.1  # 10% of the mean as std dev
+        )))
         self.type = 'reefer' if random.random() < reefer_prob else 'dry'
         
-        # Use normal distribution for train percentage (mean=15%, std=1%)
-        train_prob = max(0, min(1, random.normalvariate(0.15, 0.01)))
+        # Use normal distribution for train percentage based on config
+        train_prob = max(0, min(1, random.normalvariate(
+            MODAL_SPLIT["train"],
+            MODAL_SPLIT["train"] * 0.067  # ~1% std dev for 15% mean
+        )))
         self.modal = 'train' if random.random() < train_prob else 'truck'
         
         self.arrival_time = arrival_time
@@ -26,13 +32,18 @@ class Container:
         self.ready_time = None
         self.departure_time = None
         
-        # Set planned dwell time based on type
+        # Set planned dwell time based on type from config
         if self.type == 'reefer':
-            # 2.1 ± 0.8 days
-            self.dwell_time = random.normalvariate(2.1, 0.8) * 24 * 60
+            self.dwell_time = random.normalvariate(
+                CONTAINER_TYPES["reefer"]["dwell_time"]["mean"],
+                CONTAINER_TYPES["reefer"]["dwell_time"]["std"]
+            ) * 24 * 60  # Convert days to minutes
         else:
-            # 2.47 ± 1.5 days
-            self.dwell_time = random.normalvariate(2.47, 1.5) * 24 * 60
+            self.dwell_time = random.normalvariate(
+                CONTAINER_TYPES["dry"]["dwell_time"]["mean"],
+                CONTAINER_TYPES["dry"]["dwell_time"]["std"]
+            ) * 24 * 60  # Convert days to minutes
+            
         self.dwell_time = max(60, self.dwell_time)  # Minimum 1 hour dwell time
 
 class Ship:
@@ -251,8 +262,17 @@ class Statistics:
 
     def plot_statistics(self):
         """Generate visualizations of key statistics"""
-        #plt.style.use('seaborn')
-        fig = plt.figure(figsize=(15, 15))  # Made figure taller for 6 subplots
+        # Print debug info
+        print(f"\nDwell time statistics:")
+        print(f"Dry containers: {len(self.dwell_times['dry'])} records")
+        print(f"Reefer containers: {len(self.dwell_times['reefer'])} records")
+        
+        if not self.dwell_times['dry'] and not self.dwell_times['reefer']:
+            print("No dwell time data available for plotting")
+            return
+        
+        # First figure: Operational statistics
+        fig1 = plt.figure(figsize=(15, 15))
         
         # 1. Container Arrivals Time Series
         ax1 = plt.subplot(3, 2, 1)
@@ -301,31 +321,56 @@ class Statistics:
         ax4.pie(type_data, labels=['Dry', 'Reefer'], autopct='%1.1f%%')
         ax4.set_title('Container Type Split')
         
-        # 5. Dry Container Yard Utilization
+        # 5. Yard Utilization
         ax5 = plt.subplot(3, 2, 5)
         hours = sorted(self.yard_utilization['dry']['truck'].keys())
         
-        dry_truck = [self.yard_utilization['dry']['truck'][h] for h in hours]
-        dry_train = [self.yard_utilization['dry']['train'][h] for h in hours]
+        dry_total = [self.yard_utilization['dry']['truck'][h] + self.yard_utilization['dry']['train'][h] for h in hours]
+        reefer_total = [self.yard_utilization['reefer']['truck'][h] + self.yard_utilization['reefer']['train'][h] for h in hours]
         
-        ax5.plot(hours, dry_truck, label='Truck', color='blue')
-        ax5.plot(hours, dry_train, label='Train', color='green')
-        ax5.set_title('Dry Container Yard Utilization')
+        ax5.plot(hours, dry_total, label='Dry', color='blue')
+        ax5.plot(hours, reefer_total, label='Reefer', color='red')
+        ax5.set_title('Total Yard Utilization by Container Type')
         ax5.set_xlabel('Hour')
         ax5.set_ylabel('Container Count')
         ax5.legend()
         
-        # 6. Reefer Container Yard Utilization
-        ax6 = plt.subplot(3, 2, 6)
-        reefer_truck = [self.yard_utilization['reefer']['truck'][h] for h in hours]
-        reefer_train = [self.yard_utilization['reefer']['train'][h] for h in hours]
+        plt.tight_layout()
         
-        ax6.plot(hours, reefer_truck, label='Truck', color='red')
-        ax6.plot(hours, reefer_train, label='Train', color='orange')
-        ax6.set_title('Reefer Container Yard Utilization')
-        ax6.set_xlabel('Hour')
-        ax6.set_ylabel('Container Count')
-        ax6.legend()
+        # Second figure: Dwell Time Analysis
+        fig2 = plt.figure(figsize=(15, 6))
+        
+        # 1. Dwell Time Histograms
+        ax1 = plt.subplot(1, 2, 1)
+        
+        # Convert minutes to days for plotting
+        dry_dwell_days = [x/(24*60) for x in self.dwell_times['dry']]
+        reefer_dwell_days = [x/(24*60) for x in self.dwell_times['reefer']]
+        
+        if dry_dwell_days:
+            ax1.hist(dry_dwell_days, bins=50, alpha=0.5, label='Dry', color='blue')
+        if reefer_dwell_days:
+            ax1.hist(reefer_dwell_days, bins=50, alpha=0.5, label='Reefer', color='red')
+        ax1.set_title('Container Dwell Time Distribution')
+        ax1.set_xlabel('Dwell Time (days)')
+        ax1.set_ylabel('Number of Containers')
+        ax1.legend()
+        
+        # 2. Dwell Time Box Plots
+        ax2 = plt.subplot(1, 2, 2)
+        dwell_data = []
+        labels = []
+        if dry_dwell_days:
+            dwell_data.append(dry_dwell_days)
+            labels.append('Dry')
+        if reefer_dwell_days:
+            dwell_data.append(reefer_dwell_days)
+            labels.append('Reefer')
+        
+        if dwell_data:
+            ax2.boxplot(dwell_data, labels=labels)
+            ax2.set_title('Dwell Time Box Plot')
+            ax2.set_ylabel('Dwell Time (days)')
         
         plt.tight_layout()
         plt.show()
@@ -520,9 +565,9 @@ class PortSimulation:
                         self.stats.log_wait_time('gate', self.env.now - start_wait)
                         self.stats.log_container_departure(container.type, 'truck', departure_hour)
                         self.stats.log_dwell_time(container.type, actual_dwell_time)
+                        print(f"Logged dwell time for {container.type}: {actual_dwell_time/1440:.2f} days")  # Debug print
                         break
                 else:
-                    # Container has already been processed or removed, exit quietly
                     break
 
     def handle_train_departure(self):
@@ -581,7 +626,7 @@ class PortSimulation:
 if __name__ == "__main__":
     # Run simulation for 30 days
     sim = PortSimulation()
-    sim.run(60 * 24 * 60)  # 30 days in minutes
+    sim.run(30 * 24 * 60)  # 30 days in minutes
     
     # Print hourly truck departure distribution
     print("\nHourly Truck Departure Distribution:")
